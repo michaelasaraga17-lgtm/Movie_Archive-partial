@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Movie Archive</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300..600;1,6..72,300..600&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: '#1c1e21',    // page
+            panel: '#25282c',  // poster fallback, inputs
+            line: '#383c41',   // hairlines
+            bone: '#e6e3dc',   // main text
+            mute: '#9a9a94',   // secondary text
+            accent: '#a8bccf'  // the one accent
+          },
+          fontFamily: {
+            serif: ['Newsreader', 'Georgia', 'serif'],
+            sans: ['"Hanken Grotesk"', 'system-ui', 'sans-serif']
+          }
+        }
+      }
+    };
+  </script>
+
+  <style>
+    :focus-visible { outline: 2px solid #a8bccf; outline-offset: 3px; }
+    /* Staggered poster grid: every second poster sits a little lower */
+    #grid > li:nth-child(even) { margin-top: 1.5rem; }
+    @media (min-width: 768px) { #grid > li:nth-child(even) { margin-top: 2.5rem; } }
+    .poster img { filter: saturate(.85); transition: filter .25s, opacity .25s; }
+    .card:hover .poster img { filter: saturate(1); }
+    .card:hover .card-title { text-decoration: underline; text-decoration-color: #a8bccf; text-underline-offset: 4px; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  </style>
+</head>
+
+<body class="bg-ink text-bone font-sans antialiased">
+
+  <header class="max-w-[1400px] mx-auto px-6 lg:px-12 pt-8 flex items-baseline justify-between">
+    <a href="index.html" class="font-serif text-2xl tracking-tight">Movie Archive</a>
+    <p class="hidden sm:block text-sm text-mute">A small index of films worth revisiting.</p>
+  </header>
+
+  <main class="max-w-[1400px] mx-auto px-6 lg:px-12">
+
+    <!-- Featured -->
+    <section id="featured" aria-live="polite" class="py-16 lg:py-24 border-b border-line min-h-[24rem]">
+      <p class="text-mute">Loading the featured film…</p>
+    </section>
+
+    <!-- Index -->
+    <section class="py-16 lg:py-24 lg:grid lg:grid-cols-[13rem_1fr] lg:gap-16">
+
+      <aside class="mb-12 lg:mb-0">
+        <div class="lg:sticky lg:top-8 space-y-8">
+          <div>
+            <label for="search" class="sr-only">Search by title</label>
+            <input id="search" type="search" maxlength="100" autocomplete="off" placeholder="Search by title"
+                   class="w-full bg-transparent border-b border-line focus:border-accent outline-none py-2 placeholder:text-mute">
+          </div>
+
+          <div>
+            <h2 class="text-sm text-mute mb-3">Genre</h2>
+            <ul id="genres" class="flex flex-wrap lg:block gap-x-5 gap-y-1"></ul>
+          </div>
+
+          <div>
+            <label for="year" class="text-sm text-mute block mb-2">Release year</label>
+            <select id="year" class="w-full bg-panel border border-line rounded-sm px-3 py-2 text-sm">
+              <option value="">Any year</option>
+            </select>
+          </div>
+
+          <button id="clear" type="button" class="text-sm text-mute hover:text-bone underline underline-offset-4 hidden">Clear filters</button>
+        </div>
+      </aside>
+
+      <div>
+        <div class="flex items-baseline justify-between mb-10">
+          <h2 class="font-serif text-3xl">The index</h2>
+          <p id="count" class="text-sm text-mute"></p>
+        </div>
+        <ul id="grid" class="grid grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-x-5 md:gap-x-8 gap-y-10 md:gap-y-14"></ul>
+        <div id="state" class="hidden"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="max-w-[1400px] mx-auto px-6 lg:px-12 pb-12 text-sm text-mute">
+    Poster images are linked from external sources. No films are hosted here.
+  </footer>
+
+  <!-- Detail panel -->
+  <div id="detail" class="fixed inset-0 z-50 hidden">
+    <div id="detail-backdrop" class="absolute inset-0 bg-black/60"></div>
+    <aside id="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detail-title"
+           class="absolute right-0 top-0 h-full w-full max-w-3xl bg-ink border-l border-line overflow-y-auto translate-x-full transition-transform duration-300">
+      <div class="p-6 md:p-10">
+        <button id="detail-close" type="button" class="text-sm text-mute hover:text-bone underline underline-offset-4 mb-8">Close</button>
+        <div id="detail-body"></div>
+      </div>
+    </aside>
+  </div>
+
+<script>
+const API = 'api';
+const state = { q: '', genre: '', year: '' };
+let requestId = 0;
+let lastFocus = null;
+
+const $ = (id) => document.getElementById(id);
+
+// Escape anything from the database before putting it in HTML
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
+
+function formatDate(iso) {
+  const d = new Date(iso + 'T00:00:00Z');
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+}
+
+// Poster image, or a typographic title card when there's no URL / it fails to load
+function fallbackHTML(title) {
+  return `<div class="w-full h-full flex items-end p-5 bg-panel text-mute font-serif text-xl leading-tight">${esc(title)}</div>`;
+}
+function posterHTML(m) {
+  if (!m.poster_url) return fallbackHTML(m.title);
+  return `<img src="${esc(m.poster_url)}" alt="Poster for ${esc(m.title)}" loading="lazy"
+               data-title="${esc(m.title)}" class="w-full h-full object-cover">`;
+}
+// Swap broken images for the title card
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (img.tagName === 'IMG' && img.dataset.title) {
+    img.replaceWith(Object.assign(document.createElement('div'), {
+      className: 'w-full h-full', innerHTML: fallbackHTML(img.dataset.title)
+    }));
+  }
+}, true);
+
+/* ---------- Featured ---------- */
+async function loadFeatured() {
+  const box = $('featured');
+  try {
+    const [m] = await getJSON(`${API}/movies.php?featured=1`);
+    if (!m) { box.innerHTML = ''; box.classList.add('hidden'); return; }
+    box.innerHTML = `
+      <div class="grid md:grid-cols-[minmax(240px,420px)_1fr] gap-10 lg:gap-20 items-end">
+        <button type="button" data-open="${m.id}" class="poster block aspect-[2/3] w-full max-w-[420px] overflow-hidden bg-panel text-left" aria-label="Open ${esc(m.title)}">
+          ${posterHTML(m)}
+        </button>
+        <div class="pb-2">
+          <h1 class="font-serif font-light text-5xl sm:text-6xl lg:text-8xl leading-[0.95] tracking-tight mb-8">${esc(m.title)}</h1>
+          <dl class="flex flex-wrap gap-x-10 gap-y-3 text-sm mb-8">
+            <div><dt class="text-mute">Directed by</dt><dd>${esc(m.director)}</dd></div>
+            <div><dt class="text-mute">Released</dt><dd>${m.year}</dd></div>
+            <div><dt class="text-mute">Rating</dt><dd class="text-accent">${m.rating.toFixed(1)}</dd></div>
+            <div><dt class="text-mute">Genre</dt><dd>${esc(m.genres.join(', '))}</dd></div>
+          </dl>
+          <p class="font-serif text-lg leading-relaxed max-w-[56ch] text-bone/90 mb-10">${esc(m.synopsis)}</p>
+          <button type="button" data-open="${m.id}" class="border border-line hover:border-accent px-5 py-2.5 text-sm transition-colors">Read the entry</button>
+        </div>
+      </div>`;
+  } catch (err) {
+    box.innerHTML = `<p class="text-mute">${esc(err.message)}</p>`;
+  }
+}
+
+/* ---------- Filters ---------- */
+async function loadFilters() {
+  try {
+    const { genres, years } = await getJSON(`${API}/filters.php`);
+    $('genres').innerHTML = [{ id: '', name: 'All films' }, ...genres].map(g => `
+      <li><button type="button" data-genre="${g.id}"
+           class="genre-btn py-1 text-left border-l-2 pl-3 -ml-3 lg:ml-0 lg:pl-3">
+           ${esc(g.name)}${g.total !== undefined ? `<span class="text-mute text-sm ml-2">${g.total}</span>` : ''}
+      </button></li>`).join('');
+    $('year').innerHTML = '<option value="">Any year</option>' +
+      years.map(y => `<option value="${y}">${y}</option>`).join('');
+    markActiveGenre();
+  } catch (err) { /* grid will show the error */ }
+}
+
+function markActiveGenre() {
+  document.querySelectorAll('.genre-btn').forEach(b => {
+    const on = b.dataset.genre === state.genre;
+    b.classList.toggle('border-accent', on);
+    b.classList.toggle('text-bone', on);
+    b.classList.toggle('border-transparent', !on);
+    b.classList.toggle('text-mute', !on);
+    b.setAttribute('aria-pressed', on);
+  });
+  $('clear').classList.toggle('hidden', !(state.q || state.genre || state.year));
+}
+
+/* ---------- Grid ---------- */
+async function loadGrid() {
+  const id = ++requestId;
+  const params = new URLSearchParams();
+  if (state.q) params.set('q', state.q);
+  if (state.genre) params.set('genre', state.genre);
+  if (state.year) params.set('year', state.year);
+
+  try {
+    const movies = await getJSON(`${API}/movies.php?${params}`);
+    if (id !== requestId) return; // a newer request already replaced this one
+    renderGrid(movies);
+  } catch (err) {
+    if (id !== requestId) return;
+    $('grid').innerHTML = '';
+    $('count').textContent = '';
+    showState(`Couldn't load the films.`, `${err.message} Check that Apache and MySQL are running in XAMPP.`, false);
+  }
+}
+
+function renderGrid(movies) {
+  $('count').textContent = `${movies.length} ${movies.length === 1 ? 'film' : 'films'}`;
+  if (!movies.length) {
+    $('grid').innerHTML = '';
+    const filtered = state.q || state.genre || state.year;
+    showState(
+      filtered ? 'Nothing matches those filters.' : 'The archive is empty.',
+      filtered ? 'Try a shorter title, another genre, or clear the filters.' : 'Add the first film from the admin area.',
+      !!filtered
+    );
+    return;
+  }
+  $('state').classList.add('hidden');
+  $('grid').innerHTML = movies.map(m => `
+    <li>
+      <button type="button" data-open="${m.id}" class="card block w-full text-left">
+        <div class="poster aspect-[2/3] overflow-hidden bg-panel">${posterHTML(m)}</div>
+        <div class="mt-3 flex items-baseline justify-between gap-3">
+          <h3 class="card-title font-serif text-lg leading-snug">${esc(m.title)}</h3>
+          <span class="text-sm text-mute shrink-0">${m.year}</span>
+        </div>
+        <p class="text-sm text-mute">${esc(m.genres.join(', '))}</p>
+      </button>
+    </li>`).join('');
+}
+
+function showState(title, text, canClear) {
+  const s = $('state');
+  s.className = 'py-20 max-w-md';
+  s.innerHTML = `
+    <p class="font-serif text-2xl mb-2">${esc(title)}</p>
+    <p class="text-mute mb-6">${esc(text)}</p>
+    ${canClear ? '<button type="button" data-clear class="border border-line hover:border-accent px-5 py-2.5 text-sm transition-colors">Clear filters</button>' : ''}`;
+}
+
+/* ---------- Detail panel ---------- */
+async function openDetail(id) {
+  lastFocus = document.activeElement;
+  const wrap = $('detail'), panel = $('detail-panel');
+  $('detail-body').innerHTML = '<p class="text-mute">Loading…</p>';
+  wrap.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(() => panel.classList.remove('translate-x-full'));
+  $('detail-close').focus();
+
+  try {
+    const m = await getJSON(`${API}/movies.php?id=${id}`);
+    $('detail-body').innerHTML = `
+      <div class="grid sm:grid-cols-[13rem_1fr] gap-8">
+        <div class="poster aspect-[2/3] w-52 sm:w-full overflow-hidden bg-panel">${posterHTML(m)}</div>
+        <div>
+          <h2 id="detail-title" class="font-serif font-light text-4xl md:text-5xl leading-none tracking-tight mb-6">${esc(m.title)}</h2>
+          <dl class="space-y-4 text-sm">
+            <div><dt class="text-mute">Rating</dt><dd class="text-accent text-base">${m.rating.toFixed(1)} <span class="text-mute text-sm">out of 10</span></dd></div>
+            <div><dt class="text-mute">Released</dt><dd>${formatDate(m.release_date)}</dd></div>
+            <div><dt class="text-mute">Genre</dt><dd>${esc(m.genres.join(', ')) || 'Not listed'}</dd></div>
+            <div><dt class="text-mute">Director</dt><dd>${esc(m.director)}</dd></div>
+          </dl>
+        </div>
+      </div>
+      <p class="font-serif text-lg leading-relaxed max-w-[60ch] mt-10">${esc(m.synopsis)}</p>
+      <div class="mt-10">
+        <h3 class="text-sm text-mute mb-2">Cast</h3>
+        <p>${m.cast.length ? esc(m.cast.join(', ')) : 'Not listed'}</p>
+      </div>`;
+  } catch (err) {
+    $('detail-body').innerHTML = `<p class="font-serif text-2xl mb-2">Couldn't open this film.</p><p class="text-mute">${esc(err.message)}</p>`;
+  }
+}
+
+function closeDetail() {
+  const wrap = $('detail');
+  if (wrap.classList.contains('hidden')) return;
+  $('detail-panel').classList.add('translate-x-full');
+  document.body.style.overflow = '';
+  setTimeout(() => wrap.classList.add('hidden'), 300);
+  if (lastFocus) lastFocus.focus();
+}
+
+/* ---------- Events ---------- */
+function clearFilters() {
+  state.q = state.genre = state.year = '';
+  $('search').value = '';
+  $('year').value = '';
+  markActiveGenre();
+  loadGrid();
+}
+
+let timer;
+$('search').addEventListener('input', (e) => {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    state.q = e.target.value.trim().slice(0, 100);
+    markActiveGenre();
+    loadGrid();
+  }, 250);
+});
+$('year').addEventListener('change', (e) => { state.year = e.target.value; markActiveGenre(); loadGrid(); });
+$('genres').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-genre]');
+  if (!b) return;
+  state.genre = b.dataset.genre;
+  markActiveGenre();
+  loadGrid();
+});
+$('clear').addEventListener('click', clearFilters);
+$('state').addEventListener('click', (e) => { if (e.target.closest('[data-clear]')) clearFilters(); });
+
+document.addEventListener('click', (e) => {
+  const opener = e.target.closest('[data-open]');
+  if (opener) openDetail(opener.dataset.open);
+});
+$('detail-close').addEventListener('click', closeDetail);
+$('detail-backdrop').addEventListener('click', closeDetail);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetail(); });
+
+/* ---------- Start ---------- */
+loadFeatured();
+loadFilters();
+loadGrid();
+</script>
+</body>
+</html>
